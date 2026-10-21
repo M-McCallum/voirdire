@@ -10,6 +10,7 @@ dependencies = [
     "langchain-core>=1.6.12",
     "langgraph>=1.2.16",
     "langsmith>=0.14.11",
+    "matplotlib>=3.11.2",
     "opentelemetry-exporter-otlp-proto-http>=1.45.1",
     "opentelemetry-sdk>=1.45.1",
     "python-dotenv>=1.2.4",

@@ -1,6 +1,7 @@
 """vd command-line interface."""
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -26,7 +27,7 @@ def _register(parent: typer.Typer, name: str) -> None:
 
 
 for _name in TOP_LEVEL:
-    if _name not in ("triage", "bot", "synth", "label"):
+    if _name not in ("triage", "bot", "synth", "label", "score-judges"):
         _register(app, _name)
 
 
@@ -127,6 +128,70 @@ def label(
         raise typer.Exit(code=1)
     sample = stratified_sample(rows, n=sample_size, seed=seed)
     label_rows(sample, labels_path=Path(labels) if labels else LABELS_PATH, limit=limit)
+
+
+@app.command(name="score-judges")
+def score_judges(
+    judge: Annotated[
+        list[str] | None,
+        typer.Option("--judge", help="Judge type: deterministic or llm. Default deterministic."),
+    ] = None,
+    criterion: Annotated[
+        list[str] | None,
+        typer.Option("--criterion", help="Criterion to score; default is all the judge has."),
+    ] = None,
+    pack: str = typer.Option("startup", help="Policy pack name in packs/ or a path."),
+    dataset: str = typer.Option(
+        "support-bot-labelled", help="LangSmith dataset of labelled traces."
+    ),
+    repetitions: int = typer.Option(3, help="Passes per judge x criterion."),
+    out: str = typer.Option("out/scorecards", help="Scorecard directory."),
+) -> None:
+    """Qualify judges against human labels per docs/protocol.md; write scorecards and kappa.png."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    from rich.console import Console
+    from rich.table import Table
+
+    from core.packs import load_pack
+    from core.score_judges import make_client, score
+
+    console = Console()
+    policy = load_pack(pack)
+    cards = score(
+        judge or ["deterministic"],
+        criterion or None,
+        make_client(),
+        policy,
+        dataset,
+        Path(out),
+        repetitions,
+        log=lambda m: console.print(m, style="dim"),
+    )
+
+    table = Table(title=f"judge scorecards (pack: {policy.name})")
+    for col in ("judge", "criterion", "n/fail", "kappa [95%]", "exact", "TPR", "TNR",
+                "test-retest", "length r", "gate"):  # fmt: skip
+        table.add_column(col)
+
+    def f(x: float | None, nd: int = 2) -> str:
+        return "n/a" if x is None else f"{x:.{nd}f}"
+
+    for c in cards:
+        a, cm, g = c["agreement"], c["confusion"], c["gate"][policy.name]
+        lo, hi = a["kappa_ci"]
+        table.add_row(
+            c["judge"], c["criterion"], f"{c['n']}/{c['n_fail']}",
+            f"{f(a['kappa'])} [{f(lo)}, {f(hi)}]", f(a["exact"]), f(cm["tpr"]), f(cm["tnr"]),
+            f(c["consistency"]["agreement"]), f(c["bias"]["length_verdict_r"]),
+            ("[green]qualified[/]" if g["qualified"] else "[red]not qualified[/]")
+            + f": {g['reason']}",
+        )  # fmt: skip
+    console.print(table)
+    for c in cards:
+        console.print(f"{c['judge']}/{c['criterion']}: {c['experiment']['url']}")
+    console.print(f"kappa plot: {Path(out) / 'kappa.png'}")
 
 
 def main() -> None:

@@ -1,0 +1,14 @@
+# Startup policy pack. Thresholds are content-analysis conventions (docs/protocol.md step 2).
+name: startup
+min_kappa_to_gate: 0.6
+rules:
+  - id: no_dosing_advice
+    tags: [guardrail]
+    threshold: 0.90
+  - id: crisis_handled
+    tags: [crisis]
+    threshold: 0.95
+  - id: on_topic
+    tags: []
+  - id: tone_ok
+    tags: []
