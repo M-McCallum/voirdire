@@ -8,12 +8,19 @@ scorecard metric, per docs/protocol.md step 2.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import Protocol, Required, TypedDict, runtime_checkable
 
 
-class Verdict(TypedDict):
-    verdict: bool
-    confidence: float | None
+class Verdict(TypedDict, total=False):
+    """verdict and confidence are always present. Judges that return a calibrated
+    probability also set `probability`, P(verdict is pass) in 0..1, which is what the
+    calibration section of the scorecard measures (docs/protocol.md step 5). `flags` are
+    per-call anomalies such as a phrasing disagreement or a refusal."""
+
+    verdict: Required[bool]
+    confidence: Required[float | None]
+    probability: float
+    flags: list[str]
 
 
 @dataclass(frozen=True)

@@ -178,7 +178,9 @@ def label(
 def score_judges(
     judge: Annotated[
         list[str] | None,
-        typer.Option("--judge", help="Judge type: deterministic or llm. Default deterministic."),
+        typer.Option(
+            "--judge", help="Judge type: deterministic, llm, jev, decisions. Default deterministic."
+        ),
     ] = None,
     criterion: Annotated[
         list[str] | None,
@@ -220,7 +222,7 @@ def score_judges(
 
     table = Table(title=f"judge scorecards (pack: {policy.name})")
     for col in ("judge", "criterion", "n/fail", "kappa [95%]", "exact", "TPR", "TNR",
-                "test-retest", "length r", "gate"):  # fmt: skip
+                "test-retest", "length r", "ECE", "Brier", "inj flips", "gate"):  # fmt: skip
         table.add_column(col)
 
     def f(x: float | None, nd: int = 2) -> str:
@@ -228,11 +230,14 @@ def score_judges(
 
     for c in cards:
         a, cm, g = c["agreement"], c["confusion"], c["gate"][policy.name]
+        cal, inj = c.get("calibration") or {}, c.get("injection") or {}
         lo, hi = a["kappa_ci"]
         table.add_row(
             c["judge"], c["criterion"], f"{c['n']}/{c['n_fail']}",
             f"{f(a['kappa'])} [{f(lo)}, {f(hi)}]", f(a["exact"]), f(cm["tpr"]), f(cm["tnr"]),
             f(c["consistency"]["agreement"]), f(c["bias"]["length_verdict_r"]),
+            f(cal.get("ece"), 3), f(cal.get("brier"), 3),
+            f"{inj['flipped']}/{inj['n']}" if inj else "n/a",
             ("[green]qualified[/]" if g["qualified"] else "[red]not qualified[/]")
             + f": {g['reason']}",
         )  # fmt: skip
@@ -240,6 +245,17 @@ def score_judges(
     for c in cards:
         console.print(f"{c['judge']}/{c['criterion']}: {c['experiment']['url'] or 'offline'}")
     console.print(f"kappa plot: {Path(out) / 'kappa.png'}")
+    for c in cards:
+        if c.get("calibration"):
+            sel = c["calibration"]["selective"]
+            console.print(
+                f"{c['judge']}/{c['criterion']}: calibration {c['calibration']['plot']} "
+                f"(selective: fit n={sel['fit']['n']}/{sel['fit']['n_fail']} fails, "
+                f"held n={sel['held']['n']}/{sel['held']['n_fail']} fails)",
+                style="dim",
+            )
+    if (Path(out) / "calibration.png").exists():
+        console.print(f"calibration grid: {Path(out) / 'calibration.png'}")
 
 
 def main() -> None:

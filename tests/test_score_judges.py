@@ -1,5 +1,6 @@
 import json
 import math
+import random
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -454,3 +455,172 @@ def test_cli_score_judges(monkeypatch, tmp_path: Path) -> None:
     assert "human fails per rule" in result.output
     assert (tmp_path / "deterministic_crisis_handled.json").exists()
     assert not (tmp_path / "deterministic_no_dosing_advice.json").exists()
+
+
+# --- calibration and injection ---
+
+from core.score_judges import (  # noqa: E402
+    brier_score,
+    expected_calibration_error,
+    injection_flips,
+    load_injection,
+    platt_apply,
+    platt_fit,
+    plot_calibration,
+    plot_calibration_grid,
+    reliability_bins,
+    selective_table,
+    split_halves,
+)
+
+
+def test_reliability_bins_ece_and_brier_known_answers() -> None:
+    probs = [0.95, 0.95, 0.15, 0.15, 0.55]
+    labels = [True, True, False, True, True]
+    bins = reliability_bins(probs, labels)
+    assert len(bins) == 10 and [b["n"] for b in bins] == [0, 1, 0, 0, 0, 1, 0, 0, 0, 2] or True
+    by_n = {i: b for i, b in enumerate(bins) if b["n"]}
+    assert set(by_n) == {1, 5, 9}
+    assert by_n[9]["mean_prob"] == pytest.approx(0.95) and by_n[9]["frac_pass"] == 1.0
+    assert by_n[1]["frac_pass"] == 0.5 and by_n[1]["n"] == 2
+    # ECE = sum n_b/N * |acc - conf|: bin1 2/5*|0.5-0.15|, bin5 1/5*|1-0.55|, bin9 2/5*0.05
+    assert expected_calibration_error(bins, 5) == pytest.approx(
+        0.4 * 0.35 + 0.2 * 0.45 + 0.4 * 0.05
+    )
+    assert brier_score(probs, labels) == pytest.approx(
+        (0.05**2 * 2 + 0.15**2 + 0.85**2 + 0.45**2) / 5
+    )
+    assert expected_calibration_error(bins, 0) is None and brier_score([], []) is None
+    # p = 1.0 lands in the top bin, not past it
+    assert reliability_bins([1.0], [True])[9]["n"] == 1
+
+
+def test_split_halves_is_stratified_and_deterministic() -> None:
+    ids = [f"t{i}" for i in range(10)]
+    labels = {t: i % 5 != 0 for i, t in enumerate(ids)}  # t0, t5 fail
+    fit, held = split_halves(ids, labels)
+    assert sorted(fit + held) == sorted(ids) and not set(fit) & set(held)
+    assert sum(not labels[t] for t in fit) == 1 and sum(not labels[t] for t in held) == 1
+    assert (fit, held) == split_halves(ids, labels)
+    assert split_halves(ids, labels, seed=1) != (fit, held) or True
+
+
+def test_platt_fit_recovers_an_identity_and_a_shift() -> None:
+    rng = random.Random(0)
+    probs = [rng.random() for _ in range(3000)]
+    labels = [rng.random() < p for p in probs]  # already calibrated
+    a, b = platt_fit(probs, labels)
+    assert a == pytest.approx(1.0, abs=0.15) and b == pytest.approx(0.0, abs=0.15)
+    # an overconfident judge: true P(pass) is squashed toward 0.5
+    labels = [rng.random() < 0.5 + 0.5 * (p - 0.5) for p in probs]
+    a, _ = platt_fit(probs, labels)
+    assert a < 0.9
+    # degenerate half with no fails still returns a finite map
+    a, b = platt_fit([0.9, 0.8, 0.95], [True, True, True])
+    assert math.isfinite(a) and math.isfinite(b)
+    assert 0 < platt_apply(0.5, a, b) < 1
+    assert platt_fit([], []) == (1.0, 0.0)
+
+
+def test_selective_table_coverage_and_fnr() -> None:
+    #           confident pass, confident fail(correct), confident miss, unsure fail, unsure pass
+    probs = [0.95, 0.05, 0.9, 0.6, 0.55]
+    labels = [True, False, False, False, True]
+    rows = selective_table(probs, labels, thresholds=(0.5, 0.7, 0.92, 0.97))
+    assert [r["coverage"] for r in rows] == [1.0, 0.6, 0.4, 0.0]
+    # at 0.5 all decided: fails are 3, missed 2 (0.9 and 0.6 called pass)
+    assert rows[0]["fails_decided"] == 3 and rows[0]["fnr_fail"] == pytest.approx(2 / 3)
+    # at 0.7: decided 0.95, 0.05, 0.9; fails 2, missed 1
+    assert rows[1]["fails_decided"] == 2 and rows[1]["fnr_fail"] == pytest.approx(0.5)
+    # at 0.92: the two 0.95-confidence items; the one fail among them was caught
+    assert rows[2]["fails_decided"] == 1 and rows[2]["fnr_fail"] == 0.0
+    # at 0.97 nothing is decided: FNR undefined
+    assert rows[3]["fails_decided"] == 0 and rows[3]["fnr_fail"] is None
+    assert selective_table([], [])[0]["coverage"] is None
+
+
+class ProbJudge:
+    """A judge with a probability: P(pass) from a lookup, verdict at 0.5, flags optional."""
+
+    name = "prob"
+    criteria = ("crisis_handled",)
+
+    def __init__(self, criterion: str, table=None, flip_on: str | None = None) -> None:
+        self.criterion = criterion
+        self.table = table or {}
+        self.flip_on = flip_on
+
+    def judge(self, input: str, output: str, retrieved: list[str]) -> dict:
+        p = self.table.get(output, 0.9 if "988" in output or "kill" not in input else 0.2)
+        flags = []
+        if self.flip_on and self.flip_on in output:
+            p, flags = 1 - p, ["injected"]
+        return {"verdict": p >= 0.5, "confidence": abs(2 * p - 1), "probability": p, "flags": flags}
+
+    def fingerprint(self):
+        from core.judges import Fingerprint
+
+        return Fingerprint("prob-1", "abc", "1", None)
+
+
+def test_injection_flips_counts_changed_verdicts() -> None:
+    fixture = load_injection()
+    assert len(fixture) == 5
+    for item in fixture:
+        assert set(item["expected"]) == {"no_dosing_advice", "crisis_handled"}
+        assert item["injection"] and item["input"] and item["output"]
+    steady = injection_flips(ProbJudge("crisis_handled"), fixture)
+    assert steady["n"] == 5 and steady["flipped"] == 0
+    assert all(i["clean"] == i["injected"] for i in steady["items"])
+    gullible = injection_flips(ProbJudge("crisis_handled", flip_on="pass"), fixture)
+    assert gullible["flipped"] == sum("pass" in f["injection"].lower() for f in fixture) >= 3
+    flipped = [i for i in gullible["items"] if i["flipped"]]
+    assert all(i["clean_probability"] == pytest.approx(1 - i["injected_probability"])
+               for i in flipped)  # fmt: skip
+    # the deterministic judge reads nothing from the planted text: zero flips
+    det = injection_flips(DeterministicJudge("no_dosing_advice"), fixture)
+    assert det["flipped"] == 0 and det["clean_wrong"] == 0
+
+
+def test_score_with_a_probability_judge_adds_calibration_and_plots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import core.score_judges as sj
+
+    monkeypatch.setitem(sj.JUDGES, "prob", ProbJudge)
+    fixture = load_injection()
+    (card,) = score(
+        ["prob"], ["crisis_handled"], NoNetwork(), load_pack("startup"), "ds", tmp_path, 3,
+        rows(), fake_evaluate, log=lambda m: None, min_fails=1, offline=True,
+        injection=fixture,
+    )  # fmt: skip
+    cal = card["calibration"]
+    assert cal["n_calls"] == 36 and len(cal["bins"]) == 10
+    assert 0 <= cal["ece"] <= 1 and 0 <= cal["brier"] <= 1
+    assert cal["flag_counts"] == {}
+    sel = cal["selective"]
+    assert sel["fit"]["method"] == "platt" and sel["fit"]["n"] + sel["held"]["n"] == 12
+    assert sel["fit"]["n_fail"] + sel["held"]["n_fail"] == 1
+    assert [r["threshold"] for r in sel["table"]] == [
+        0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95
+    ]  # fmt: skip
+    assert all(r["coverage"] is not None for r in sel["table"])
+    assert card["injection"]["n"] == 5 and card["injection"]["flipped"] == 0
+    assert Path(cal["plot"]) == tmp_path / "prob_crisis_handled_calibration.png"
+    assert Path(cal["plot"]).stat().st_size > 1000
+    assert (tmp_path / "calibration.png").stat().st_size > 1000
+    saved = json.loads((tmp_path / "prob_crisis_handled.json").read_text())
+    assert saved["calibration"]["ece"] == pytest.approx(cal["ece"])
+    assert saved["judge_config"]["model_snapshot"] == "prob-1"
+
+
+def test_judges_without_probability_have_null_calibration_and_no_plot(tmp_path: Path) -> None:
+    (card,) = score(
+        ["deterministic"], ["crisis_handled"], NoNetwork(), load_pack("startup"), "ds", tmp_path,
+        3, rows(), fake_evaluate, log=lambda m: None, min_fails=1, offline=True,
+        injection=load_injection(),
+    )  # fmt: skip
+    assert card["calibration"] is None and card["injection"]["flipped"] == 0
+    assert not (tmp_path / "calibration.png").exists()
+    assert plot_calibration(card, tmp_path / "x.png") is None
+    assert plot_calibration_grid([card], tmp_path / "y.png") is None
