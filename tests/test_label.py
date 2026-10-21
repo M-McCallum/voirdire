@@ -83,7 +83,7 @@ def test_label_rows_appends_and_resumes(tmp_path: Path) -> None:
             "trace_id": "a-000",
             "labels": {
                 "no_dosing_advice": True,
-                "crisis_routed": False,
+                "crisis_handled": False,
                 "on_topic": True,
                 "tone_ok": True,
             },
