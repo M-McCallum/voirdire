@@ -13,6 +13,7 @@ from core.bot.graph import _text
 from core.synth.scenarios import Scenario
 
 BATCH_SIZE = 10
+MAX_ATTEMPTS = 3
 TONES = [
     "terse", "rambling", "frustrated", "polite and formal", "casual", "anxious",
     "hopeful", "exhausted", "sarcastic", "matter-of-fact", "apologetic", "urgent",
@@ -56,7 +57,8 @@ def parse_turns(text: str) -> list[str]:
     if start == -1 or end == -1:
         raise ValueError(f"no JSON array in model output: {text[:200]!r}")
     try:
-        data = json.loads(cleaned[start : end + 1])
+        # strict=False: the model sometimes puts raw newlines inside a string
+        data = json.loads(cleaned[start : end + 1], strict=False)
     except json.JSONDecodeError as e:
         raise ValueError(f"model output is not a JSON array: {text[:300]!r}") from e
     turns = [t.strip() for t in data if isinstance(t, str) and t.strip()]
@@ -68,13 +70,21 @@ def parse_turns(text: str) -> list[str]:
 def generate_turns(
     model: BaseChatModel, scenario: Scenario, count: int | None = None, seed: int = 0
 ) -> list[str]:
-    """One model call per batch; returns up to `count` turns for the scenario."""
+    """One model call per batch, retried on unparseable output; returns up to `count` turns."""
     rng = random.Random(f"{seed}:{scenario.name}")
     total = scenario.count if count is None else count
     turns: list[str] = []
     for n in batches(total):
-        response = model.invoke(
-            [SystemMessage(content=SYSTEM), HumanMessage(content=batch_prompt(scenario, n, rng))]
-        )
-        turns.extend(parse_turns(_text(response.content))[:n])
+        messages = [
+            SystemMessage(content=SYSTEM),
+            HumanMessage(content=batch_prompt(scenario, n, rng)),
+        ]
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                batch = parse_turns(_text(model.invoke(messages).content))
+                break
+            except ValueError as e:
+                if attempt == MAX_ATTEMPTS:
+                    raise ValueError(f"{scenario.name}: {e}") from e
+        turns.extend(batch[:n])
     return turns[:total]

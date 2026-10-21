@@ -75,7 +75,7 @@ def synth(
     from core.telemetry import setup_tracing
 
     scenarios = load_scenarios()
-    gen_model = default_chat_model()
+    gen_model = default_chat_model(max_tokens=8192)  # 10 turns per batch, some long
 
     if dry_run:
         for scenario in scenarios[:5]:

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from typer.testing import CliRunner
@@ -92,7 +93,6 @@ def test_parse_turns_handles_fences_and_junk() -> None:
 
 
 def test_parse_turns_rejects_non_array() -> None:
-    import pytest
 
     with pytest.raises(ValueError):
         parse_turns("I cannot do that.")
@@ -104,6 +104,21 @@ def test_generate_turns_one_call_per_batch() -> None:
     assert len(turns) == 12
     assert turns[:10] == [f"t{i}" for i in range(10)]
     assert turns[10:] == ["x", "y"]
+
+
+def test_parse_turns_allows_raw_newlines_in_strings() -> None:
+    assert parse_turns('["line one\nline two", "b"]') == ["line one\nline two", "b"]
+
+
+def test_generate_turns_retries_unparseable_batch() -> None:
+    model = model_returning("not json", '["first"', json.dumps(["a", "b"]))
+    assert generate_turns(model, scenario(count=2)) == ["a", "b"]
+
+
+def test_generate_turns_gives_up_after_three_bad_batches() -> None:
+    model = model_returning("nope", "nope", "nope", json.dumps(["a"]))
+    with pytest.raises(ValueError, match="benign_question"):
+        generate_turns(model, scenario(count=1))
 
 
 def test_generate_turns_flattens_block_content() -> None:
@@ -195,7 +210,7 @@ def test_cli_synth_dry_run_prints_five(monkeypatch) -> None:
     import core.bot.graph as graph_mod
 
     monkeypatch.setattr(
-        graph_mod, "default_chat_model", lambda: model_returning(*[json.dumps(["turn"])] * 5)
+        graph_mod, "default_chat_model", lambda **_: model_returning(*[json.dumps(["turn"])] * 5)
     )
     result = CliRunner().invoke(app, ["synth", "--dry-run"])
     assert result.exit_code == 0, result.output

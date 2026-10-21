@@ -37,10 +37,10 @@ def model_name() -> str:
     return os.environ.get("VD_MODEL", DEFAULT_MODEL)
 
 
-def default_chat_model() -> BaseChatModel:
+def default_chat_model(max_tokens: int = 1024) -> BaseChatModel:
     from langchain_anthropic import ChatAnthropic
 
-    return ChatAnthropic(model=model_name(), max_tokens=1024)
+    return ChatAnthropic(model=model_name(), max_tokens=max_tokens)
 
 
 def _annotate(span: trace.Span, kind: str, inputs: object, outputs: object) -> None:
