@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -176,6 +177,44 @@ def test_spans_root_with_children() -> None:
 
     assert children(blocked) == {"bot.retrieve", "bot.crisis", "bot.guard"}
     assert children(generated) == {"bot.retrieve", "bot.crisis", "bot.guard", "bot.generate"}
+
+
+def test_spans_carry_inputs_and_outputs() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+    import core.telemetry as telemetry
+
+    with trace.use_span(tracer.start_span("harness"), end_on_exit=True):
+        original = telemetry.trace.get_tracer
+        telemetry.trace.get_tracer = lambda *_a, **_k: tracer
+        try:
+            run("I can't start my work", build_graph(fake_model("Try body doubling."), retriever()))
+        finally:
+            telemetry.trace.get_tracer = original
+
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    root = spans["bot.run"].attributes
+    assert root["langsmith.span.kind"] == "chain"
+    assert root["openinference.span.kind"] == "CHAIN"
+    assert json.loads(root["input.value"]) == {"message": "I can't start my work"}
+    assert json.loads(root["output.value"]) == {"answer": "Try body doubling."}
+    assert root["gen_ai.prompt"] == root["input.value"]
+    assert root["gen_ai.completion"] == root["output.value"]
+
+    gen = spans["bot.generate"].attributes
+    assert gen["langsmith.span.kind"] == "llm"
+    assert gen["gen_ai.system"] == "anthropic"
+    prompt = json.loads(gen["gen_ai.prompt"])
+    assert [m["role"] for m in prompt] == ["system", "human"]
+    assert load_prompt("v1") in prompt[0]["content"]
+    assert json.loads(gen["gen_ai.completion"]) == [
+        {"role": "assistant", "content": "Try body doubling."}
+    ]
+
+    assert spans["bot.retrieve"].attributes["input.value"] == "I can't start my work"
+    assert json.loads(spans["bot.guard"].attributes["output.value"]) == {"matched": False}
 
 
 def test_setup_tracing_targets_collector_endpoint(monkeypatch) -> None:

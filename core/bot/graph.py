@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -42,6 +43,18 @@ def default_chat_model() -> BaseChatModel:
     return ChatAnthropic(model=model_name(), max_tokens=1024)
 
 
+def _annotate(span: trace.Span, kind: str, inputs: object, outputs: object) -> None:
+    """Attach inputs/outputs under the attribute names LangSmith and Phoenix both read."""
+    inp = inputs if isinstance(inputs, str) else json.dumps(inputs)
+    out = outputs if isinstance(outputs, str) else json.dumps(outputs)
+    span.set_attribute("langsmith.span.kind", kind)
+    span.set_attribute("openinference.span.kind", kind.upper())
+    span.set_attribute("input.value", inp)
+    span.set_attribute("output.value", out)
+    span.set_attribute("gen_ai.prompt", inp)
+    span.set_attribute("gen_ai.completion", out)
+
+
 def _node(name: str, fn: Callable[[BotState], BotState]) -> Callable[[BotState], BotState]:
     def wrapped(state: BotState) -> BotState:
         with tracer().start_as_current_span(f"bot.{name}"):
@@ -56,19 +69,25 @@ def build_graph(model: BaseChatModel, retriever: Retriever, prompt_version: str 
 
     def retrieve(state: BotState) -> BotState:
         docs = retriever.search(state["message"])
-        trace.get_current_span().set_attribute("retrieve.docs", [d.name for d in docs])
+        span = trace.get_current_span()
+        span.set_attribute("retrieve.docs", [d.name for d in docs])
+        _annotate(span, "retriever", state["message"], [d.name for d in docs])
         return {"docs": docs}
 
     def crisis(state: BotState) -> BotState:
         hit = crisis_match(state["message"])
-        trace.get_current_span().set_attribute("crisis.matched", hit)
+        span = trace.get_current_span()
+        span.set_attribute("crisis.matched", hit)
+        _annotate(span, "tool", state["message"], {"matched": hit})
         if hit:
             return {"blocked_by": "crisis", "answer": CRISIS_RESPONSE}
         return {}
 
     def guard(state: BotState) -> BotState:
         hit = medication_match(state["message"])
-        trace.get_current_span().set_attribute("guard.matched", hit)
+        span = trace.get_current_span()
+        span.set_attribute("guard.matched", hit)
+        _annotate(span, "tool", state["message"], {"matched": hit})
         if hit:
             return {"blocked_by": "guard", "answer": GUARD_REFUSAL}
         return {}
@@ -76,16 +95,26 @@ def build_graph(model: BaseChatModel, retriever: Retriever, prompt_version: str 
     def generate(state: BotState) -> BotState:
         context = "\n\n".join(f"## {d.name}\n{d.text}" for d in state.get("docs", []))
         span = trace.get_current_span()
+        span.set_attribute("gen_ai.system", "anthropic")
         span.set_attribute("gen_ai.request.model", model_name())
         span.set_attribute("gen_ai.prompt.version", prompt_version)
-        response = model.invoke(
-            [SystemMessage(content=system_prompt + context), HumanMessage(content=state["message"])]
-        )
+        messages = [
+            SystemMessage(content=system_prompt + context),
+            HumanMessage(content=state["message"]),
+        ]
+        response = model.invoke(messages)
         usage = getattr(response, "usage_metadata", None) or {}
         if usage:
             span.set_attribute("gen_ai.usage.input_tokens", usage.get("input_tokens", 0))
             span.set_attribute("gen_ai.usage.output_tokens", usage.get("output_tokens", 0))
-        return {"answer": _text(response.content)}
+        answer = _text(response.content)
+        _annotate(
+            span,
+            "llm",
+            [{"role": m.type, "content": m.content} for m in messages],
+            [{"role": "assistant", "content": answer}],
+        )
+        return {"answer": answer}
 
     def after_check(state: BotState) -> str:
         return "blocked" if state.get("blocked_by") else "continue"
@@ -120,5 +149,6 @@ def run(message: str, graph, prompt_version: str = "v1") -> BotState:
         span.set_attribute("model", model_name())
         result = graph.invoke({"message": message})
         span.set_attribute("blocked_by", result.get("blocked_by") or "")
+        _annotate(span, "chain", {"message": message}, {"answer": result["answer"]})
         result["trace_id"] = format(span.get_span_context().trace_id, "032x")
         return result
