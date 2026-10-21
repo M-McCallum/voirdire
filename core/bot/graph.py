@@ -17,7 +17,7 @@ from core.bot.guards import CRISIS_RESPONSE, GUARD_REFUSAL, crisis_match, medica
 from core.telemetry import tracer
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
-DEFAULT_MODEL = "claude-opus-5-5"
+DEFAULT_MODEL = "claude-haiku-5-5"
 
 
 class BotState(TypedDict, total=False):
