@@ -24,7 +24,7 @@ def test_help_lists_every_subcommand() -> None:
 
 def test_placeholders_exit_1() -> None:
     for name in TOP_LEVEL:
-        if name == "triage":
+        if name in ("triage", "bot"):
             continue
         result = runner.invoke(app, [name])
         assert result.exit_code == 1, name

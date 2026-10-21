@@ -24,8 +24,32 @@ def _register(parent: typer.Typer, name: str) -> None:
 
 
 for _name in TOP_LEVEL:
-    if _name != "triage":
+    if _name not in ("triage", "bot"):
         _register(app, _name)
+
+
+@app.command()
+def bot(
+    message: str = typer.Argument(..., help="One user turn."),
+    prompt_version: str = typer.Option("v1", help="Prompt file in prompts/."),
+) -> None:
+    """Run one turn of the coping-skills chatbot and print the answer."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    from core.bot import build_graph, run
+    from core.bot.corpus import Retriever
+    from core.bot.graph import default_chat_model
+    from core.telemetry import setup_tracing
+
+    provider = setup_tracing()
+    graph = build_graph(default_chat_model(), Retriever.from_dir(), prompt_version)
+    try:
+        result = run(message, graph, prompt_version)
+    finally:
+        provider.shutdown()
+    typer.echo(result["answer"])
+
 
 for _name in TRIAGE:
     _register(triage_app, _name)

@@ -6,6 +6,13 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "langchain-anthropic>=1.7.6",
+    "langchain-core>=1.6.12",
+    "langgraph>=1.2.16",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "python-dotenv>=1.2.4",
+    "rank-bm25>=0.2.2",
     "typer>=0.12",
 ]
 
