@@ -1,13 +1,13 @@
 from typer.testing import CliRunner
 
-import engine
-from engine.cli import TOP_LEVEL, TRIAGE, app
+import core
+from core.cli import TOP_LEVEL, TRIAGE, app
 
 runner = CliRunner()
 
 
-def test_engine_imports() -> None:
-    assert engine.__doc__
+def test_core_imports() -> None:
+    assert core.__doc__
 
 
 def test_help_lists_every_subcommand() -> None:
