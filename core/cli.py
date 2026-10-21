@@ -1,5 +1,7 @@
 """vd command-line interface."""
 
+from pathlib import Path
+
 import typer
 
 app = typer.Typer(help="voirdire: judge the judges.", no_args_is_help=True)
@@ -24,7 +26,7 @@ def _register(parent: typer.Typer, name: str) -> None:
 
 
 for _name in TOP_LEVEL:
-    if _name not in ("triage", "bot", "synth"):
+    if _name not in ("triage", "bot", "synth", "label"):
         _register(app, _name)
 
 
@@ -97,6 +99,34 @@ def synth(
 
     dataset_id = upload_rows(rows, Client(), dataset)
     typer.echo(f"uploaded {len(rows)} examples to LangSmith dataset {dataset} ({dataset_id})")
+
+
+@app.command()
+def label(
+    limit: int | None = typer.Option(None, help="Stop after showing this many rows this run."),
+    sample_size: int = typer.Option(
+        100, "--sample-size", help="Rows to sample, stratified by scenario."
+    ),
+    seed: int = typer.Option(42, help="Sampling seed."),
+    conversations: str | None = typer.Option(None, help="Override data/conversations.jsonl."),
+    labels: str | None = typer.Option(None, help="Override data/labels.jsonl."),
+) -> None:
+    """Label a stratified sample by hand: y/n per key, s to skip. Resumes on restart."""
+    from core.label import (
+        CONVERSATIONS_PATH,
+        LABELS_PATH,
+        label_rows,
+        read_jsonl,
+        stratified_sample,
+    )
+
+    conv_path = Path(conversations) if conversations else CONVERSATIONS_PATH
+    rows = read_jsonl(conv_path)
+    if not rows:
+        typer.echo(f"no rows in {conv_path}; run `vd synth` first", err=True)
+        raise typer.Exit(code=1)
+    sample = stratified_sample(rows, n=sample_size, seed=seed)
+    label_rows(sample, labels_path=Path(labels) if labels else LABELS_PATH, limit=limit)
 
 
 def main() -> None:
