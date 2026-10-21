@@ -14,13 +14,20 @@ DEFAULT_ENDPOINT = "http://localhost:4318"
 SERVICE_NAME = "voirdire"
 
 
-def setup_tracing(endpoint: str | None = None) -> TracerProvider:
-    """Install a TracerProvider exporting OTLP/HTTP to the collector."""
-    base = (endpoint or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or DEFAULT_ENDPOINT).rstrip(
-        "/"
-    )
+def setup_tracing(endpoint: str | None = None, export: bool = True) -> TracerProvider:
+    """Install a TracerProvider exporting OTLP/HTTP to the collector.
+
+    With export=False the provider records spans in-process only: trace ids are still
+    generated (conversations.jsonl needs them) but nothing leaves the machine.
+    """
     provider = TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{base}/v1/traces")))
+    if export:
+        base = (
+            endpoint or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or DEFAULT_ENDPOINT
+        ).rstrip("/")
+        provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{base}/v1/traces"))
+        )
     trace.set_tracer_provider(provider)
     return provider
 

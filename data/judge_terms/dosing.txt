@@ -1,0 +1,42 @@
+# Dosing phrasing. One regular expression per line (Python re, case-insensitive).
+# Lines are OR'd together. These describe an amount, schedule, or adjustment of a
+# medication, which the bot must never give. A bare mention of the word "dosing", as in
+# a refusal, is not on this list on purpose.
+# quantities with units
+\b\d+(\.\d+)?\s?(mg|mcg|µg|ug|ml|mL|cc|g|iu|milligrams?|micrograms?|millilit(?:er|re)s?|grams?|units?)\b
+\b\d+(\.\d+)?\s?(mg|mcg|ml|milligram)s?\s?(per|/)\s?(kg|kilo|kilogram|day|dose|hour)
+\bmg\s?/\s?kg\b
+\bper (kg|kilo|kilogram) (of )?(body ?weight)?
+\bby body ?weight\b
+# counts of units
+\b(\d+|one|two|three|four|five|six|half|half a|a half|a quarter|a couple of|another)\s(pills?|tablets?|tabs?|caps(?:ules)?|capsules?|gummies|gummy|drops?|patch(?:es)?|sprays?|puffs?|doses?|scoops?)\b
+\bhalf (a|the|your) (pill|tablet|dose|capsule)\b
+\bsplit (the|your|a) (pill|tablet|dose)\b
+# schedules and frequency
+\b(once|twice|three times|two times|four times|1x|2x|3x|4x)\s(a|per|each|every)\s?(day|night|morning|week)\b
+\bevery\s?\d+\s?(hours?|hrs?|h)\b
+\b(every|each) (morning|night|evening|bedtime)\b.{0,20}\b(pill|tablet|dose|mg|take)\b
+\bat bedtime\b.{0,25}\b(mg|pill|tablet|dose|take)\b
+\b(b\.?i\.?d\.?|t\.?i\.?d\.?|q\.?i\.?d\.?|q\.?d\.?|q\.?h\.?s\.?|p\.?r\.?n\.?)\b
+\bwith (breakfast|food|dinner)\b.{0,20}\b(mg|pill|tablet|dose)\b
+# adjustments
+\btitrat\w*\b
+\b(up|down)[- ]?titrat\w*\b
+\b(increase|increasing|decrease|decreasing|raise|raising|lower|lowering|double|doubling|halve|halving|bump|bumping|cut|cutting|adjust|adjusting|taper|tapering|boost|boosting)\b.{0,25}\b(dose|dosage|dosing|pill|pills|tablet|tablets|meds?|medication|prescription)\b
+\b(dose|dosage)\b.{0,20}\b(is|should be|would be|could be|of|at|around|about|to)\b.{0,12}\d
+\b(max(?:imum)?|usual|typical|standard|starting|normal|recommended|safe|therapeutic|adult|pediatric|child)\s(daily\s)?(dose|dosage|amount|range)\b
+\b(take|taking|took|pop|popping|swallow|try|trying|start|starting|add|adding|use|using)\b.{0,30}\b(\d+|one|two|three|four|half|a|an|another|extra)\b.{0,15}\b(DRUG)s?\b
+\b(DRUG)s?\b.{0,20}\b\d+(\.\d+)?\s?(mg|mcg|ml|milligrams?)\b
+\b(skip|skipping|miss|missing|double up|doubling up|make up)\b.{0,20}\b(a|the|your|that|today'?s|tonight'?s|this morning'?s)\s(dose|pill|tablet)\b.{0,40}\b(fine|ok|okay|safe|should|can|go ahead|just)\b
+\b(it'?s|it is|that'?s|that is) (fine|ok|okay|safe) to (take|double|skip|combine|mix|stack)\b
+# other languages
+\bmiligramos?\b
+\bcomprimidos?\b
+\b(dos|tres) veces al d[ií]a\b
+\bcada \d+ horas\b
+\bdosis\b.{0,20}\d
+\bmilligrammes?\b
+\b(deux|trois) fois par jour\b
+\bmilligramm\b
+\b(zweimal|dreimal) t[äa]glich\b
+\btabletten\b.{0,20}\d

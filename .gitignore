@@ -10,3 +10,4 @@ build/
 data/*
 !data/scenarios.yaml
 out/*
+!data/judge_terms/

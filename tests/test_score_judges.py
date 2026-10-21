@@ -183,8 +183,9 @@ class FakeClient:
 
 
 def fake_evaluate(target, *, data, evaluators, summary_evaluators, experiment_prefix,
-                  num_repetitions, metadata, **_):  # fmt: skip
+                  num_repetitions, metadata, **kwargs):  # fmt: skip
     """Runs the target, row evaluators and summary evaluators in-process, like evaluate()."""
+    fake_evaluate.kwargs = kwargs
     examples = list(data)
     runs, rows = [], []
     for _ in range(num_repetitions):
@@ -195,7 +196,8 @@ def fake_evaluate(target, *, data, evaluators, summary_evaluators, experiment_pr
             evals = [ev(run, ex) for ev in evaluators]
             runs.append(run)
             rows.append({"run": run, "example": ex, "evaluation_results": evals})
-    summary = [s(runs, examples) for s in summary_evaluators]
+    # like evaluate(): the examples list handed to summary evaluators repeats per repetition
+    summary = [s(runs, examples * num_repetitions) for s in summary_evaluators]
     name = f"{experiment_prefix}-abc123"
     results = SimpleNamespace(
         experiment_name=name, url=f"https://smith.example/{name}", summary=summary,
@@ -269,7 +271,7 @@ def test_run_experiment_three_passes_and_summary_evaluators() -> None:
     examples = list(client.list_examples(dataset_id=info["id"]))
     fake_evaluate.calls.clear()
     outcome = run_experiment(
-        DeterministicJudge("crisis_handled"), examples, client, info, 3, fake_evaluate
+        DeterministicJudge("crisis_handled"), examples, client, info, 3, fake_evaluate, min_fails=1
     )
     assert outcome.experiment_name.startswith("judge-deterministic-crisis_handled")
     assert len(outcome.passes) == 12 and all(len(v) == 3 for v in outcome.passes.values())
@@ -277,6 +279,8 @@ def test_run_experiment_three_passes_and_summary_evaluators() -> None:
     (results,) = fake_evaluate.calls
     assert results.metadata["caching"] == "disabled" and results.metadata["repetitions"] == 3
     assert results.metadata["dataset_version_tag"] == info["version_tag"]
+    assert fake_evaluate.kwargs["disable_evaluator_tracing"] is True
+    assert fake_evaluate.kwargs["upload_results"] is True
     keys = {s["key"]: s["score"] for s in results.summary}
     assert keys["test_retest"] == pytest.approx(1.0)
     # judge says t01 is handled (no crisis regex hit, no 988), human says not: kappa 0
@@ -287,10 +291,14 @@ def test_run_experiment_three_passes_and_summary_evaluators() -> None:
 def test_score_end_to_end_writes_scorecards_feedback_and_plot(tmp_path: Path) -> None:
     client = FakeClient()
     pack = load_pack("startup")
+    logs = []
     cards = score(
         ["deterministic"], None, client, pack, "ds", tmp_path, 3, rows(), fake_evaluate,
-        log=lambda m: None,
+        log=logs.append, min_fails=1,
     )  # fmt: skip
+    assert logs[0] == (
+        "human fails per rule: no_dosing_advice 0, crisis_handled 1, on_topic 0, tone_ok 0"
+    )
     assert [(c["judge"], c["criterion"]) for c in cards] == [
         ("deterministic", "no_dosing_advice"),
         ("deterministic", "crisis_handled"),
@@ -301,16 +309,22 @@ def test_score_end_to_end_writes_scorecards_feedback_and_plot(tmp_path: Path) ->
         assert saved["n"] == 12 and saved["n_calls"] == 36
         assert saved["experiment"]["repetitions"] == 3 and saved["experiment"]["url"]
         assert saved["dataset"]["version_tag"].startswith("labels-")
-        assert saved["judge_config"]["rubric_version"] == "guards-s1"
-        assert saved["agreement"]["bootstrap"]["resamples"] == 5000
+        assert saved["judge_config"]["rubric_version"] == "judge-terms-1"
         assert saved["computed_at"] and saved["experiment"]["sentinel_run_id"]
         assert set(saved["gate"]) == {"startup"}
     nda, crisis = cards
-    # perfect agreement on no_dosing_advice but humans never failed it: kappa undefined
+    # humans never failed no_dosing_advice: below min_fails, so no kappa at all
+    assert nda["status"] == "INSUFFICIENT_FAILS" and nda["n_fail"] == 0
     assert nda["agreement"]["kappa"] is None and nda["agreement"]["kappa_ci"] == [None, None]
-    assert nda["agreement"]["bootstrap"]["undefined_kappa_resamples"] == 5000
+    assert (
+        nda["agreement"]["bootstrap"] is None
+        and "INSUFFICIENT_FAILS" in nda["agreement"]["skipped"]
+    )
     assert nda["agreement"]["exact"] == 1.0 and nda["confusion"]["tpr"] is None
-    assert nda["gate"]["startup"]["qualified"] is False
+    assert nda["bias"]["kappa_longest_third"] is None
+    assert nda["gate"]["startup"] == {"qualified": False, "reason": "INSUFFICIENT_FAILS: 0 of 1"}
+    assert crisis["status"] == "SCORED" and crisis["n_fail"] == 1
+    assert crisis["agreement"]["bootstrap"]["resamples"] == 5000
     assert crisis["agreement"]["kappa"] == pytest.approx(0.0)
     assert crisis["confusion"] == {
         "positive_class": "fail", "tp": 0, "fp": 0, "fn": 3, "tn": 33,
@@ -329,6 +343,81 @@ def test_score_end_to_end_writes_scorecards_feedback_and_plot(tmp_path: Path) ->
         client.read_project(project_name=crisis["experiment"]["name"]).id
     )
     assert (tmp_path / "kappa.png").stat().st_size > 1000
+
+
+def test_feedback_failure_keeps_scorecard_and_plot(tmp_path: Path) -> None:
+    class QuotaClient(FakeClient):
+        def create_run(self, *a, **kw):
+            raise RuntimeError("429 monthly unique traces usage limit exceeded")
+
+    logs = []
+    (card,) = score(
+        ["deterministic"], ["crisis_handled"], QuotaClient(), load_pack("startup"), "ds",
+        tmp_path, 3, rows(), fake_evaluate, log=logs.append,
+    )  # fmt: skip
+    assert card["experiment"]["sentinel_run_id"] is None
+    assert card["experiment"]["feedback_error"].startswith("RuntimeError: 429")
+    saved = json.loads((tmp_path / "deterministic_crisis_handled.json").read_text())
+    assert saved["experiment"]["feedback_error"] == card["experiment"]["feedback_error"]
+    assert any("could not attach scorecard feedback" in m for m in logs)
+    assert (tmp_path / "kappa.png").exists()
+
+
+class NoNetwork:
+    """Any attribute access means a LangSmith call was attempted."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"LangSmith client used offline: {name}")
+
+
+def test_offline_makes_no_langsmith_calls(tmp_path: Path) -> None:
+    logs = []
+    cards = score(
+        ["deterministic"], None, NoNetwork(), load_pack("startup"), "ds", tmp_path, 3, rows(),
+        fake_evaluate, log=logs.append, min_fails=1, offline=True,
+    )  # fmt: skip
+    assert fake_evaluate.kwargs["upload_results"] is False
+    assert len(cards) == 2 and all(c["experiment"]["offline"] for c in cards)
+    crisis = cards[1]
+    assert crisis["status"] == "SCORED" and crisis["agreement"]["kappa"] == pytest.approx(0.0)
+    assert crisis["experiment"]["url"] is None and crisis["experiment"]["sentinel_run_id"] is None
+    assert crisis["experiment"]["name"].startswith("judge-deterministic-crisis_handled-offline-")
+    assert crisis["dataset"]["version_tag"].startswith("labels-") and crisis["n"] == 12
+    assert any("offline" in m for m in logs)
+    assert (tmp_path / "kappa.png").exists()
+    saved = json.loads((tmp_path / "deterministic_crisis_handled.json").read_text())
+    assert saved["experiment"]["offline"] is True
+
+
+def test_cli_score_judges_offline(monkeypatch, tmp_path: Path) -> None:
+    import core.score_judges as sj
+
+    monkeypatch.setattr(sj, "make_client", lambda: NoNetwork())
+    monkeypatch.setattr(sj, "evaluate", fake_evaluate)
+    monkeypatch.setattr(sj, "load_labelled", rows)
+    result = CliRunner().invoke(app, ["score-judges", "--offline", "--out", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "offline" in result.output and "smith.example" not in result.output
+    assert (tmp_path / "deterministic_crisis_handled.json").exists()
+
+
+def test_default_min_fails_is_twenty_and_skips_kappa(tmp_path: Path) -> None:
+    client = FakeClient()
+    fake_evaluate.calls.clear()
+    (card,) = score(
+        ["deterministic"], ["crisis_handled"], client, load_pack("startup"), "ds", tmp_path, 3,
+        rows(), fake_evaluate, log=lambda m: None,
+    )  # fmt: skip
+    assert card["status"] == "INSUFFICIENT_FAILS"
+    assert card["min_fails"] == 20 and card["n_fail"] == 1
+    assert card["agreement"]["kappa"] is None and card["agreement"]["kappa_per_pass"] == []
+    assert card["consistency"]["agreement"] == 1.0 and card["confusion"]["fn"] == 3
+    assert card["gate"]["startup"]["reason"] == "INSUFFICIENT_FAILS: 1 of 20"
+    (results,) = fake_evaluate.calls
+    kappa = next(s for s in results.summary if s["key"] == "kappa")
+    assert kappa["score"] is None and kappa["comment"] == "INSUFFICIENT_FAILS: 1"
+    assert not qualified(card, load_pack("regulated"))
+    assert (tmp_path / "kappa.png").exists()
 
 
 def test_plot_handles_undefined_and_multiple_judges(tmp_path: Path) -> None:
@@ -362,5 +451,6 @@ def test_cli_score_judges(monkeypatch, tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "crisis_handled" in result.output and "smith.example" in result.output
+    assert "human fails per rule" in result.output
     assert (tmp_path / "deterministic_crisis_handled.json").exists()
     assert not (tmp_path / "deterministic_no_dosing_advice.json").exists()

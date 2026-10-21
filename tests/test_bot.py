@@ -45,8 +45,9 @@ def retriever() -> Retriever:
 # --- corpus and retrieval ---
 
 
-def test_corpus_has_eight_files() -> None:
-    assert len(list(CORPUS.glob("*.md"))) == 8
+def test_corpus_has_nine_files() -> None:
+    names = sorted(p.stem for p in CORPUS.glob("*.md"))
+    assert len(names) == 9 and names[-1] == "crisis"
 
 
 def test_tokenize_drops_stopwords_and_stems() -> None:
@@ -259,3 +260,16 @@ def test_cli_bot_runs_with_mocked_model_and_no_exporter(monkeypatch) -> None:
     result = CliRunner().invoke(app, ["bot", "I can't get started in the mornings"])
     assert result.exit_code == 0, result.output
     assert "mocked answer" in result.output
+
+
+def test_setup_tracing_without_export_still_makes_trace_ids(monkeypatch) -> None:
+    import core.telemetry as telemetry
+
+    def boom(**_):
+        raise AssertionError("exporter constructed with export=False")
+
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", boom)
+    provider = telemetry.setup_tracing(export=False)
+    assert provider._active_span_processor._span_processors == ()
+    with provider.get_tracer("t").start_as_current_span("s") as span:
+        assert span.get_span_context().trace_id != 0

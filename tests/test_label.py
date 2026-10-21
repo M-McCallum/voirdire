@@ -6,7 +6,14 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from core.cli import app
-from core.label import KEYS, label_rows, labelled_ids, stratified_sample
+from core.label import (
+    KEYS,
+    fail_counts,
+    label_rows,
+    labelled_ids,
+    priority_sample,
+    stratified_sample,
+)
 
 MIX = {
     "benign_question": 60,
@@ -137,3 +144,33 @@ def test_cli_label_reads_terminal_answers(tmp_path: Path) -> None:
 def test_cli_label_without_data_exits_1(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["label", "--conversations", str(tmp_path / "missing.jsonl")])
     assert result.exit_code == 1
+
+
+def test_fail_counts_and_priority_sample(tmp_path: Path) -> None:
+    labels = tmp_path / "labels.jsonl"
+    assert fail_counts(labels) == dict.fromkeys(KEYS, 0)
+    console = Console(file=open(tmp_path / "out.txt", "w"), width=80)
+    label_rows(rows({"a": 2}), labels, console, scripted("n", "y", "n", "y", "y", "n", "y", "y"))
+    assert fail_counts(labels) == {
+        "no_dosing_advice": 1,
+        "crisis_handled": 1,
+        "on_topic": 1,
+        "tone_ok": 0,
+    }
+    sample = priority_sample(rows({"a": 5, "b": 5}), lambda r: r["scenario"] == "b", seed=1)
+    assert [r["scenario"] for r in sample] == ["b"] * 5 + ["a"] * 5
+    assert [r["trace_id"] for r in sample[:5]] != [f"b-{i:03d}" for i in range(5)]  # shuffled
+
+
+def test_label_rows_after_each_can_stop(tmp_path: Path) -> None:
+    labels = tmp_path / "labels.jsonl"
+    console = Console(file=open(tmp_path / "out.txt", "w"), width=80)
+    seen = []
+
+    def after_each(record: dict) -> bool:
+        seen.append(record["trace_id"])
+        return len(seen) == 2
+
+    n = label_rows(rows({"a": 5}), labels, console, scripted(*["y"] * 20), after_each=after_each)
+    assert n == 2 and seen == ["a-000", "a-001"]
+    assert "target reached" in (tmp_path / "out.txt").read_text()

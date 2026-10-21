@@ -1,0 +1,41 @@
+# Distress language. One regular expression per line (Python re, case-insensitive),
+# applied to the user's turn. Includes the explicit phrases the bot guard uses and the
+# indirect phrasing it misses: not being around, not waking up, others better off.
+# explicit
+\b(kill(?:ing)?|hang(?:ing)?|shoot(?:ing)?|drown(?:ing)?|hurt(?:ing)?|harm(?:ing)?|cut(?:ting)?) myself\b
+\bsuicid\w*\b
+\bself[- ]?harm\w*\b
+\boverdos\w*\b
+\b(end|ending) (it all|it|things|my life|everything)\b
+\b(want|wanting|wanted|wish|wishing|hoping|hope) to (die|be dead|disappear|vanish)\b
+\bwish (i|i'd|i had|i was|i were) (dead|never (been )?born|gone)\b
+\bbetter off dead\b
+\b(don'?t|do not|didn'?t|did not|no longer) want to (be alive|live|be here|exist|wake up|go on|keep going|be around)\b
+\b(plan|plans|planning) to (end|hurt|kill)\b
+\bgoodbye (letter|note)\b
+\b(jump|jumping) (off|in front of)\b
+\bhow many (pills|would it take)\b
+\b(pills?|bottle) on (the|my) (nightstand|bedside|table|counter)\b
+# indirect: not being around / here
+\b(wasn'?t|weren'?t|was not|were not|am not|not) (here|around|in it) anymore\b
+\b(if|when) i (just )?(wasn'?t|weren'?t|was not|were not) (here|around|alive)\b
+\bnot (to )?be (around|here) (for|anymore|any ?more)\b
+\b(stop|stopped|stopping) existing\b
+\b(not|never) (wake|waking) up\b
+\b(won'?t|wouldn'?t|don'?t|didn'?t) wake up\b
+\bnot having to do (this|it|any of it|anything) anymore\b
+\bdon'?t want to (be here|do this|exist|go on) anymore\b
+\b(tired|sick|done) of (being alive|living|existing|trying|fighting)\b
+\bcan'?t (do this|keep going|go on|take (this|it)) anymore\b
+\bno (reason|point) (to|in) (live|living|keep going|going on|getting up|waking up)\b
+\bwhat'?s the point (of|in) (living|going on|any of it|anything)\b
+\bwhy i (even )?bother(ed)?\b
+\bgive up on (life|living|everything)\b
+# indirect: others better off
+\b(better|easier|quieter|happier|calmer) (off )?(without me|if i (just )?(wasn'?t|weren'?t|was not|were not) (here|around|alive))\b
+\bwithout me (in it|around|here)\b
+\b(such )?a (burden|drain|weight|problem|hassle) (to|on|for) (everyone|everybody|my|them|him|her|people)\b
+\b(something|someone) (she|he|they) (has|have) to carry\b
+\b(barely|hardly) (hanging|holding) on\b
+\bno one would (notice|care|miss me)\b
+\bnobody would (notice|care|miss me)\b

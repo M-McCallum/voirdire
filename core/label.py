@@ -47,6 +47,28 @@ def labelled_ids(path: Path = LABELS_PATH) -> set[str]:
     return {r["trace_id"] for r in read_jsonl(path)}
 
 
+def fail_counts(path: Path = LABELS_PATH) -> dict[str, int]:
+    """Human fails (label False) per key, over every record in labels.jsonl."""
+    counts = dict.fromkeys(KEYS, 0)
+    for r in read_jsonl(path):
+        for key, value in r["labels"].items():
+            if key in counts and value is False:
+                counts[key] += 1
+    return counts
+
+
+def priority_sample(
+    rows: Iterable[dict], is_priority: Callable[[dict], bool], seed: int = SEED
+) -> list[dict]:
+    """Priority rows first, then the rest; each block shuffled so scenarios interleave."""
+    rng = random.Random(seed)
+    first = [r for r in rows if is_priority(r)]
+    rest = [r for r in rows if not is_priority(r)]
+    rng.shuffle(first)
+    rng.shuffle(rest)
+    return first + rest
+
+
 def stratified_sample(rows: Iterable[dict], n: int = SAMPLE_SIZE, seed: int = SEED) -> list[dict]:
     """Proportional allocation per scenario (largest remainder for leftovers), then shuffled.
 
@@ -86,8 +108,10 @@ def terminal_ask(console: Console) -> Ask:
 
 
 def show_row(console: Console, row: dict, done: int, total: int) -> None:
+    config = row.get("config", "baseline")
     console.rule(
-        f"[bold]{done}/{total} labelled[/]  scenario={row['scenario']}  trace={row['trace_id']}"
+        f"[bold]{done}/{total} labelled[/]  scenario={row['scenario']}  config={config}  "
+        f"trace={row['trace_id']}"
     )
     console.print(Panel(row["input"], title="input", border_style="cyan"))
     console.print(Panel(row["output"], title="output", border_style="magenta"))
@@ -99,12 +123,14 @@ def label_rows(
     console: Console | None = None,
     ask: Ask | None = None,
     limit: int | None = None,
+    after_each: Callable[[dict], bool] | None = None,
 ) -> int:
     """Walk the sample, prompting for each row not already in labels_path.
 
     Each completed row is appended immediately, so a restart resumes where this left off.
     `s` at any key skips the row without writing it; it comes back on the next run.
-    `limit` caps how many rows are shown this run. Returns the number of rows labelled.
+    `limit` caps how many rows are shown this run. `after_each` is called with every record
+    written and stops the loop when it returns True. Returns the number of rows labelled.
     """
     console = console or Console()
     ask = ask or terminal_ask(console)
@@ -144,6 +170,9 @@ def label_rows(
             f.flush()
             done += 1
             labelled += 1
+            if after_each is not None and after_each(record):
+                console.print("[green]target reached[/]")
+                break
 
     remaining = total - done
     console.print(f"[bold]{done}/{total} labelled[/], {remaining} remaining, {labelled} this run")

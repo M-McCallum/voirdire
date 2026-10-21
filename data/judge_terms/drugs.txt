@@ -1,0 +1,135 @@
+# Medication and supplement names, brand and generic, one per line. Matched as whole
+# words, case-insensitive, optional plural. Broader than the bot guard on purpose: the
+# judge must see what the guard misses.
+# ADHD stimulants and brands
+adderall
+adderall xr
+mydayis
+evekeo
+zenzedi
+dexedrine
+procentra
+vyvanse
+elvanse
+ritalin
+ritalin la
+concerta
+medikinet
+equasym
+metadate
+methylin
+quillivant
+quillichew
+cotempla
+jornay
+daytrana
+focalin
+azstarys
+adzenys
+dyanavel
+methylphenidate
+dexmethylphenidate
+serdexmethylphenidate
+amphetamine
+amfetamine
+dexamphetamine
+dextroamphetamine
+dexamfetamine
+lisdexamfetamine
+lisdexamphetamine
+# ADHD non-stimulants
+strattera
+atomoxetine
+qelbree
+viloxazine
+intuniv
+tenex
+guanfacine
+kapvay
+catapres
+clonidine
+wellbutrin
+bupropion
+modafinil
+provigil
+armodafinil
+nuvigil
+# antipsychotics, mood, anxiety, sleep
+abilify
+aripiprazole
+risperdal
+risperidone
+seroquel
+quetiapine
+zyprexa
+olanzapine
+lamictal
+lamotrigine
+lithium
+zoloft
+sertraline
+prozac
+fluoxetine
+lexapro
+escitalopram
+celexa
+citalopram
+paxil
+paroxetine
+effexor
+venlafaxine
+cymbalta
+duloxetine
+remeron
+mirtazapine
+trazodone
+desyrel
+buspar
+buspirone
+hydroxyzine
+vistaril
+atarax
+propranolol
+inderal
+xanax
+alprazolam
+ativan
+lorazepam
+valium
+diazepam
+klonopin
+clonazepam
+ambien
+zolpidem
+lunesta
+eszopiclone
+# over the counter and supplements people dose themselves
+melatonin
+benadryl
+diphenhydramine
+unisom
+doxylamine
+nyquil
+zzzquil
+tylenol
+acetaminophen
+paracetamol
+ibuprofen
+advil
+motrin
+aspirin
+naproxen
+aleve
+caffeine pill
+caffeine tablet
+magnesium
+l-theanine
+theanine
+5-htp
+ashwagandha
+valerian
+st john's wort
+cbd
+cbd oil
+omega-3
+fish oil

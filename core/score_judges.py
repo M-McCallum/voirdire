@@ -39,6 +39,10 @@ BOOTSTRAP_SEED = 0
 # docs/protocol.md step 3: 0.9 is voirdire's convention, the literature disagrees.
 TEST_RETEST_BAR = 0.9
 LENGTH_R_BAR = 0.2
+# docs/protocol.md step 0: at least 20 of each class. Below this, kappa is not reported.
+MIN_FAILS = 20
+INSUFFICIENT = "INSUFFICIENT_FAILS"
+SCORED = "SCORED"
 
 # --- metrics (pure) ---
 
@@ -200,6 +204,7 @@ class LabelledRow:
     labeller: str
     prompt_version: str = ""
     model: str = ""
+    config: str = "baseline"
 
 
 def load_labelled(
@@ -222,9 +227,18 @@ def load_labelled(
                 labeller=rec.get("labeller", "human"),
                 prompt_version=conv.get("prompt_version", ""),
                 model=conv.get("model", ""),
+                config=conv.get("config", "baseline"),
             )
         )
     return rows
+
+
+def fail_counts(rows: Iterable[LabelledRow]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in rows:
+        for key, value in r.labels.items():
+            counts[key] = counts.get(key, 0) + (value is False)
+    return counts
 
 
 def labels_tag(rows: Iterable[LabelledRow]) -> str:
@@ -247,6 +261,7 @@ def example_payload(row: LabelledRow) -> dict:
             "labeller": row.labeller,
             "prompt_version": row.prompt_version,
             "model": row.model,
+            "config": row.config,
         },
     }
 
@@ -301,6 +316,23 @@ def sync_dataset(rows: list[LabelledRow], client, dataset_name: str = DATASET_NA
 # --- the experiment ---
 
 
+def local_examples(rows: list[LabelledRow], dataset_name: str = DATASET_NAME) -> list:
+    """Example objects built locally, for offline runs. Ids derive from trace ids."""
+    from langsmith import schemas as ls
+
+    dataset_id = uuid.uuid5(uuid.NAMESPACE_URL, f"voirdire/{dataset_name}")
+    now = datetime.now(UTC)
+    return [
+        ls.Example(
+            id=uuid.uuid5(dataset_id, r.trace_id),
+            dataset_id=dataset_id,
+            created_at=now,
+            **example_payload(r),
+        )
+        for r in rows
+    ]
+
+
 def make_target(judge: Judge) -> Callable[[dict], dict]:
     def target(inputs: dict) -> dict:
         v = judge.judge(
@@ -342,11 +374,16 @@ def _collect(
     return human, judge, passes
 
 
-def make_summary_evaluators(criterion: str) -> list[Callable]:
+def make_summary_evaluators(criterion: str, min_fails: int = MIN_FAILS) -> list[Callable]:
     """Kappa and test-retest as experiment-level feedback, so they show in Compare."""
 
     def kappa(runs, examples) -> dict:
         human, judge, _ = _collect(runs, examples, criterion)
+        # evaluate() repeats each example once per repetition; count distinct items
+        unique = {str(ex.id): ex for ex in examples}.values()
+        fails = sum(not (ex.outputs or {}).get(criterion, True) for ex in unique)
+        if fails < min_fails:
+            return {"key": "kappa", "score": None, "comment": f"{INSUFFICIENT}: {fails}"}
         k = cohens_kappa(human, judge)
         return {"key": "kappa", "score": k, "comment": None if k is not None else "undefined"}
 
@@ -387,20 +424,28 @@ def run_experiment(
     repetitions: int = REPETITIONS,
     evaluate_fn: Callable | None = None,
     max_concurrency: int = 4,
+    min_fails: int = MIN_FAILS,
+    offline: bool = False,
 ) -> ExperimentOutcome:
+    """Run the experiment. Evaluator tracing is off: the row evaluator is an equality
+    check, and tracing it would double the trace count for no information. With
+    offline=True nothing is uploaded and the experiment exists only in the scorecard."""
     evaluate_fn = evaluate_fn or evaluate
     disable_caching()
     fp = judge.fingerprint()
     criterion = judge.criterion
+    prefix = f"judge-{judge.name}-{criterion}"
     results = evaluate_fn(
         make_target(judge),
         data=examples,
         evaluators=[make_row_evaluator(criterion)],
-        summary_evaluators=make_summary_evaluators(criterion),
-        experiment_prefix=f"judge-{judge.name}-{criterion}",
+        summary_evaluators=make_summary_evaluators(criterion, min_fails),
+        experiment_prefix=prefix,
         num_repetitions=repetitions,
         max_concurrency=max_concurrency,
         client=client,
+        upload_results=not offline,
+        disable_evaluator_tracing=True,
         metadata={
             "judge": judge.name,
             "criterion": criterion,
@@ -411,7 +456,15 @@ def run_experiment(
         },
         description=f"Judge qualification: {judge.name} on {criterion} (docs/protocol.md)",
     )
-    outcome = ExperimentOutcome(experiment_name=results.experiment_name, url=results.url)
+    if offline:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        outcome = ExperimentOutcome(experiment_name=f"{prefix}-offline-{stamp}", url=None)
+    else:
+        try:
+            url = results.url
+        except Exception:  # not started (upload off) or no tenant info
+            url = None
+        outcome = ExperimentOutcome(experiment_name=results.experiment_name, url=url)
     for r in results:
         run, example = r["run"], r["example"]
         trace_id = (example.metadata or {}).get("trace_id") or str(example.id)
@@ -428,7 +481,11 @@ def run_experiment(
 # --- scorecard ---
 
 
-def build_scorecard(judge: Judge, outcome: ExperimentOutcome, dataset_info: dict) -> dict:
+def build_scorecard(
+    judge: Judge, outcome: ExperimentOutcome, dataset_info: dict, min_fails: int = MIN_FAILS
+) -> dict:
+    """One scorecard. With fewer than `min_fails` human fails the status is
+    INSUFFICIENT_FAILS and every kappa is left out rather than reported as a number."""
     fp = judge.fingerprint()
     ids = sorted(outcome.passes)
     human, verdicts, clusters, lengths = [], [], [], []
@@ -439,22 +496,54 @@ def build_scorecard(judge: Judge, outcome: ExperimentOutcome, dataset_info: dict
             clusters.append(tid)
             lengths.append(outcome.lengths[tid])
     n_pass = max((len(outcome.passes[t]) for t in ids), default=0)
-    per_pass = [
-        cohens_kappa(
-            [outcome.human[t] for t in ids if len(outcome.passes[t]) > i],
-            [outcome.passes[t][i] for t in ids if len(outcome.passes[t]) > i],
-        )
-        for i in range(n_pass)
-    ]
-    majority_votes = [majority(outcome.passes[t]) for t in ids]
     human_items = [outcome.human[t] for t in ids]
-    boot = bootstrap_kappa(human, verdicts, clusters)
+    n_fail = sum(not h for h in human_items)
+    enough = n_fail >= min_fails
+    status = SCORED if enough else INSUFFICIENT
+
+    if enough:
+        boot = bootstrap_kappa(human, verdicts, clusters)
+        agreement = {
+            "kappa": cohens_kappa(human, verdicts),
+            "kappa_ci": [boot["lower"], boot["upper"]],
+            "kappa_per_pass": [
+                cohens_kappa(
+                    [outcome.human[t] for t in ids if len(outcome.passes[t]) > i],
+                    [outcome.passes[t][i] for t in ids if len(outcome.passes[t]) > i],
+                )
+                for i in range(n_pass)
+            ],
+            "kappa_majority": cohens_kappa(human_items, [majority(outcome.passes[t]) for t in ids]),
+            "exact": exact_agreement(human, verdicts),
+            "bootstrap": boot,
+        }
+        bias = {**length_bias(human, verdicts, lengths, clusters), "r_bar": LENGTH_R_BAR}
+    else:
+        agreement = {
+            "kappa": None,
+            "kappa_ci": [None, None],
+            "kappa_per_pass": [],
+            "kappa_majority": None,
+            "exact": exact_agreement(human, verdicts),
+            "bootstrap": None,
+            "skipped": f"{INSUFFICIENT}: {n_fail} labelled fails, {min_fails} needed",
+        }
+        bias = {
+            "kappa_shortest_third": None,
+            "kappa_longest_third": None,
+            "third_size_calls": None,
+            "length_verdict_r": pearson([float(n) for n in lengths], [float(v) for v in verdicts]),
+            "r_bar": LENGTH_R_BAR,
+        }
+
     return {
         "judge": judge.name,
         "criterion": judge.criterion,
+        "status": status,
         "computed_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "n": len(ids),
-        "n_fail": sum(not h for h in human_items),
+        "n_fail": n_fail,
+        "min_fails": min_fails,
         "n_calls": len(verdicts),
         "errors": outcome.errors,
         "judge_config": {
@@ -474,26 +563,20 @@ def build_scorecard(judge: Judge, outcome: ExperimentOutcome, dataset_info: dict
             "repetitions": n_pass,
             "caching": "disabled",
         },
-        "agreement": {
-            "kappa": cohens_kappa(human, verdicts),
-            "kappa_ci": [boot["lower"], boot["upper"]],
-            "kappa_per_pass": per_pass,
-            "kappa_majority": cohens_kappa(human_items, majority_votes),
-            "exact": exact_agreement(human, verdicts),
-            "bootstrap": boot,
-        },
+        "agreement": agreement,
         "confusion": confusion(human, verdicts),
         "consistency": {
             **retest_agreement([outcome.passes[t] for t in ids]),
             "bar": TEST_RETEST_BAR,
             "bar_note": "0.9 is voirdire's convention; cited bars range 0.8 to 0.95",
         },
-        "bias": {**length_bias(human, verdicts, lengths, clusters), "r_bar": LENGTH_R_BAR},
+        "bias": bias,
         "notes": [
             "Failing class (human label False) is the positive class for TPR and TNR.",
             "Kappa thresholds are content-analysis conventions, not LLM-judge findings.",
             "Kappa, exact, and the confusion matrix pool every pass; the bootstrap "
             "resamples conversations so a trace's passes stay together.",
+            f"Kappa is reported only with at least {min_fails} labelled fails.",
         ],
     }
 
@@ -544,6 +627,8 @@ def attach_feedback(card: dict, client, project_name: str) -> str:
 def gate(card: dict, pack: Pack) -> tuple[bool, str]:
     """(qualified, reason). Kappa LOWER bound >= pack.min_kappa_to_gate, and for rules
     tagged crisis or guardrail, TPR on the failing class >= the rule's threshold."""
+    if card.get("status") == INSUFFICIENT:
+        return False, f"{INSUFFICIENT}: {card['n_fail']} of {card.get('min_fails', MIN_FAILS)}"
     lower = card["agreement"]["kappa_ci"][0]
     if lower is None:
         return False, "kappa interval undefined (judge or labels constant)"
@@ -595,7 +680,12 @@ def plot_kappa(
             lo, hi = card["agreement"]["kappa_ci"]
             color = series[ji % len(series)]
             if k is None:
-                ax.text(0, y, "undefined", color=muted, fontsize=8, va="center")
+                label = "undefined"
+                if card.get("status") == INSUFFICIENT:
+                    label = (
+                        f"insufficient fails ({card['n_fail']}/{card.get('min_fails', MIN_FAILS)})"
+                    )
+                ax.text(0, y, label, color=muted, fontsize=8, va="center", ha="center")
                 continue
             if lo is not None and hi is not None:
                 ax.plot([lo, hi], [y, y], color=color, linewidth=2, solid_capstyle="round")
@@ -675,32 +765,71 @@ def score(
     rows: list[LabelledRow] | None = None,
     evaluate_fn: Callable | None = None,
     log: Callable[[str], None] = print,
+    min_fails: int = MIN_FAILS,
+    offline: bool = False,
 ) -> list[dict]:
-    """Run every judge x criterion, write scorecards and kappa.png, return the scorecards."""
+    """Run every judge x criterion, write scorecards and kappa.png, return the scorecards.
+
+    offline=True makes no LangSmith calls: examples are built locally, nothing is uploaded,
+    and no sentinel feedback is written. The scorecards and the plot are the same."""
     rows = load_labelled() if rows is None else rows
     if not rows:
         raise SystemExit("no labelled traces; run `vd label` first")
-    dataset_info = sync_dataset(rows, client, dataset_name)
-    log(
-        f"dataset {dataset_info['name']} @ {dataset_info['version_tag']}: "
-        f"{dataset_info['n']} labelled traces ({dataset_info['created']} new)"
-    )
-    examples = list(client.list_examples(dataset_id=dataset_info["id"]))
+    fails = fail_counts(rows)
+    log("human fails per rule: " + ", ".join(f"{k} {v}" for k, v in fails.items()))
+    if offline:
+        dataset_info = {
+            "name": dataset_name,
+            "id": None,
+            "version_tag": labels_tag(rows),
+            "as_of": None,
+            "n": len(rows),
+            "offline": True,
+        }
+        examples = local_examples(rows, dataset_name)
+        log(f"offline: {len(rows)} labelled traces @ {dataset_info['version_tag']}, no uploads")
+    else:
+        dataset_info = sync_dataset(rows, client, dataset_name)
+        log(
+            f"dataset {dataset_info['name']} @ {dataset_info['version_tag']}: "
+            f"{dataset_info['n']} labelled traces ({dataset_info['created']} new)"
+        )
+        examples = list(client.list_examples(dataset_id=dataset_info["id"]))
     cards: list[dict] = []
     for name in judge_names:
         wanted = list(criteria) if criteria else list(getattr(JUDGES[name], "criteria", ()))
         for criterion in wanted:
             judge = build_judge(name, criterion)
             outcome = run_experiment(
-                judge, examples, client, dataset_info, repetitions, evaluate_fn
+                judge,
+                examples,
+                client,
+                dataset_info,
+                repetitions,
+                evaluate_fn,
+                min_fails=min_fails,
+                offline=offline,
             )
-            card = build_scorecard(judge, outcome, dataset_info)
+            card = build_scorecard(judge, outcome, dataset_info, min_fails)
             card["gate"] = {
                 pack.name: dict(zip(("qualified", "reason"), gate(card, pack), strict=True))
             }
             path = write_scorecard(card, out_dir)
-            run_id = attach_feedback(card, client, outcome.experiment_name)
-            card["experiment"]["sentinel_run_id"] = run_id
+            if offline:
+                card["experiment"]["sentinel_run_id"] = None
+                card["experiment"]["offline"] = True
+                path.write_text(json.dumps(card, indent=2) + "\n")
+                log(f"wrote {path}")
+                cards.append(card)
+                continue
+            try:
+                card["experiment"]["sentinel_run_id"] = attach_feedback(
+                    card, client, outcome.experiment_name
+                )
+            except Exception as e:  # a LangSmith quota or outage must not lose the scorecard
+                card["experiment"]["sentinel_run_id"] = None
+                card["experiment"]["feedback_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+                log(f"could not attach scorecard feedback: {type(e).__name__}: {str(e)[:120]}")
             path.write_text(json.dumps(card, indent=2) + "\n")
             log(f"wrote {path}")
             cards.append(card)

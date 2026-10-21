@@ -64,6 +64,25 @@ def synth(
     prompt_version: str = typer.Option("v1", help="Prompt file in prompts/."),
     dataset: str = typer.Option("support-bot-eval", help="LangSmith dataset name."),
     seed: int = typer.Option(0, help="Seed for tone/length variation."),
+    target_fails: int | None = typer.Option(
+        None,
+        "--target-fails",
+        help="Replay the grid under the planted-bad configs plus the adversarial scenario, "
+        "append to conversations.jsonl, then label (those rows first) until each rule has "
+        "this many human fails.",
+    ),
+    workers: int = typer.Option(8, help="Parallel bot runs for --target-fails."),
+    rules: str = typer.Option(
+        "no_dosing_advice,crisis_handled", help="Rules the --target-fails count applies to."
+    ),
+    limit: int | None = typer.Option(None, help="Stop labelling after this many rows."),
+    conversations: str | None = typer.Option(None, help="Override data/conversations.jsonl."),
+    labels: str | None = typer.Option(None, help="Override data/labels.jsonl."),
+    trace: bool | None = typer.Option(
+        None,
+        "--trace/--no-trace",
+        help="Export bot traces to the OTel collector. Default on, off with --target-fails.",
+    ),
 ) -> None:
     """Generate synthetic user turns, replay them through the bot, upload to LangSmith."""
     from dotenv import load_dotenv
@@ -78,6 +97,31 @@ def synth(
     scenarios = load_scenarios()
     gen_model = default_chat_model(max_tokens=8192)  # 10 turns per batch, some long
 
+    if target_fails is not None:
+        from core.label import LABELS_PATH, read_jsonl
+        from core.synth.pipeline import CONVERSATIONS_PATH
+        from core.synth.target_fails import build_fail_rich, label_until
+
+        conv_path = Path(conversations) if conversations else CONVERSATIONS_PATH
+        # labelling-only rows: trace ids are needed, exported traces are not
+        provider = setup_tracing(export=trace if trace is not None else False)
+        try:
+            written = build_fail_rich(
+                gen_model, default_chat_model(), scenarios, conv_path, workers, seed,
+                log=lambda m: typer.echo(m, err=True),
+            )  # fmt: skip
+        finally:
+            provider.shutdown()
+        typer.echo(f"appended {len(written)} rows to {conv_path}", err=True)
+        label_until(
+            read_jsonl(conv_path),
+            target_fails,
+            tuple(r.strip() for r in rules.split(",") if r.strip()),
+            Path(labels) if labels else LABELS_PATH,
+            limit=limit,
+        )
+        return
+
     if dry_run:
         for scenario in scenarios[:5]:
             (turn,) = generate_turns(gen_model, scenario, count=1, seed=seed)
@@ -87,7 +131,7 @@ def synth(
     turns = [(s.name, t) for s in scenarios for t in generate_turns(gen_model, s, seed=seed)]
     typer.echo(f"generated {len(turns)} turns across {len(scenarios)} scenarios", err=True)
 
-    provider = setup_tracing()
+    provider = setup_tracing(export=trace if trace is not None else True)
     graph = build_graph(default_chat_model(), Retriever.from_dir(), prompt_version)
     try:
         rows = replay(turns, graph, prompt_version)
@@ -146,6 +190,9 @@ def score_judges(
     ),
     repetitions: int = typer.Option(3, help="Passes per judge x criterion."),
     out: str = typer.Option("out/scorecards", help="Scorecard directory."),
+    offline: bool = typer.Option(
+        False, "--offline", help="No LangSmith calls: scorecards and plot only."
+    ),
 ) -> None:
     """Qualify judges against human labels per docs/protocol.md; write scorecards and kappa.png."""
     from dotenv import load_dotenv
@@ -162,12 +209,13 @@ def score_judges(
     cards = score(
         judge or ["deterministic"],
         criterion or None,
-        make_client(),
+        None if offline else make_client(),
         policy,
         dataset,
         Path(out),
         repetitions,
         log=lambda m: console.print(m, style="dim"),
+        offline=offline,
     )
 
     table = Table(title=f"judge scorecards (pack: {policy.name})")
@@ -190,7 +238,7 @@ def score_judges(
         )  # fmt: skip
     console.print(table)
     for c in cards:
-        console.print(f"{c['judge']}/{c['criterion']}: {c['experiment']['url']}")
+        console.print(f"{c['judge']}/{c['criterion']}: {c['experiment']['url'] or 'offline'}")
     console.print(f"kappa plot: {Path(out) / 'kappa.png'}")
 
 
