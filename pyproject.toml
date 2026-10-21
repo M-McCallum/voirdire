@@ -9,9 +9,11 @@ dependencies = [
     "langchain-anthropic>=1.7.6",
     "langchain-core>=1.6.12",
     "langgraph>=1.2.16",
+    "langsmith>=0.14.11",
     "opentelemetry-exporter-otlp-proto-http>=1.45.1",
     "opentelemetry-sdk>=1.45.1",
     "python-dotenv>=1.2.4",
+    "pyyaml>=6.0.3",
     "rank-bm25>=0.2.2",
     "typer>=0.12",
 ]

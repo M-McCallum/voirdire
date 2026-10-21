@@ -25,6 +25,7 @@ class BotState(TypedDict, total=False):
     docs: list[Doc]
     blocked_by: Literal["guard", "crisis"] | None
     answer: str
+    trace_id: str
 
 
 def load_prompt(version: str) -> str:
@@ -119,4 +120,5 @@ def run(message: str, graph, prompt_version: str = "v1") -> BotState:
         span.set_attribute("model", model_name())
         result = graph.invoke({"message": message})
         span.set_attribute("blocked_by", result.get("blocked_by") or "")
+        result["trace_id"] = format(span.get_span_context().trace_id, "032x")
         return result

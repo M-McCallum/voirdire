@@ -24,7 +24,7 @@ def _register(parent: typer.Typer, name: str) -> None:
 
 
 for _name in TOP_LEVEL:
-    if _name not in ("triage", "bot"):
+    if _name not in ("triage", "bot", "synth"):
         _register(app, _name)
 
 
@@ -53,6 +53,50 @@ def bot(
 
 for _name in TRIAGE:
     _register(triage_app, _name)
+
+
+@app.command()
+def synth(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Generate 5 turns and print them."),
+    prompt_version: str = typer.Option("v1", help="Prompt file in prompts/."),
+    dataset: str = typer.Option("support-bot-eval", help="LangSmith dataset name."),
+    seed: int = typer.Option(0, help="Seed for tone/length variation."),
+) -> None:
+    """Generate synthetic user turns, replay them through the bot, upload to LangSmith."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    from core.bot import build_graph
+    from core.bot.corpus import Retriever
+    from core.bot.graph import default_chat_model
+    from core.synth import generate_turns, load_scenarios, replay, upload_rows, write_rows
+    from core.telemetry import setup_tracing
+
+    scenarios = load_scenarios()
+    gen_model = default_chat_model()
+
+    if dry_run:
+        for scenario in scenarios[:5]:
+            (turn,) = generate_turns(gen_model, scenario, count=1, seed=seed)
+            typer.echo(f"[{scenario.name}] {turn}")
+        return
+
+    turns = [(s.name, t) for s in scenarios for t in generate_turns(gen_model, s, seed=seed)]
+    typer.echo(f"generated {len(turns)} turns across {len(scenarios)} scenarios", err=True)
+
+    provider = setup_tracing()
+    graph = build_graph(default_chat_model(), Retriever.from_dir(), prompt_version)
+    try:
+        rows = replay(turns, graph, prompt_version)
+    finally:
+        provider.shutdown()
+    path = write_rows(rows)
+    typer.echo(f"wrote {len(rows)} rows to {path}", err=True)
+
+    from langsmith import Client
+
+    dataset_id = upload_rows(rows, Client(), dataset)
+    typer.echo(f"uploaded {len(rows)} examples to LangSmith dataset {dataset} ({dataset_id})")
 
 
 def main() -> None:
